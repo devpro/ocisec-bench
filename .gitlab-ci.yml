@@ -1,0 +1,77 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "feature/init-solution"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+stages:
+  - build
+
+variables:
+  IMAGE_NAME: alpine-wait
+
+podman-build:
+  image: quay.io/podman/stable:v5.8.2   # https://quay.io/repository/podman/stable?tab=tags&tag=latest
+  stage: build
+  tags:
+    - gke
+  script:
+    - podman build . -t $IMAGE_TAG -f samples/alpine-wait/Dockerfile
+    - podman save -o image.tar $IMAGE_TAG
+  variables:
+    BUILDAH_FORMAT: docker
+    IMAGE_TAG: $IMAGE_NAME:1.0.$CI_PIPELINE_ID
+  artifacts:
+    expire_in: 1 hours
+    paths:
+      - image.tar
+
+wiz-scan:
+  stage: build
+  needs:
+    - podman-build
+  tags:
+    - gke
+  image: docker:29.7.2
+  services:
+    - name: docker:29.7.2-dind
+      alias: docker
+      command:
+        - "--tls=false"
+  script:
+    - |
+      LOAD_OUTPUT=$(docker load -i image.tar)
+      LOADED_TAG=$(echo "$LOAD_OUTPUT" | awk '{print $NF}')
+      IMAGE_TAG="$IMAGE_NAME:${LOADED_TAG##*:}"
+      docker tag "$LOADED_TAG" "$IMAGE_TAG"
+      echo "Scanning [$IMAGE_TAG]"
+      docker pull public-registry.wiz.io/wiz-app/wizcli:1
+      docker tag public-registry.wiz.io/wiz-app/wizcli:1 wizcli:latest
+      docker run --rm wizcli:latest version
+      if ! docker run --rm \
+        --privileged \
+        --security-opt apparmor:unconfined \
+        --cap-add SYS_ADMIN \
+        -e WIZ_CLIENT_ID="$WIZ_CLIENT_ID" \
+        -e WIZ_CLIENT_SECRET="$WIZ_CLIENT_SECRET" \
+        -v /var/lib/docker:/var/lib/docker \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /var/run/docker/containerd/containerd.sock:/run/containerd/containerd.sock \
+        wizcli:latest scan container-image "$IMAGE_TAG" --driver=mountWithLayers; then
+          echo "=== SCAN FAILED: Dumping diagnostics ==="
+          echo "LOAD_OUTPUT: $LOAD_OUTPUT"
+          echo "Loaded as [$LOADED_TAG]"
+          printf '%s' "$IMAGE_TAG" | od -c | tail -5
+          echo "WIZ_CLIENT_ID length: ${#WIZ_CLIENT_ID}"
+          echo "WIZ_CLIENT_SECRET length: ${#WIZ_CLIENT_SECRET}"
+          docker info
+          docker ps -a
+
+          echo "Pausing 300s for interactive inspection..."
+          sleep 300
+          exit 1
+      fi
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
