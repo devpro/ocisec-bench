@@ -1,0 +1,71 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+stages:
+  - build
+
+variables:
+  IMAGE_NAME: alpine-wait
+
+podman-build:
+  image: quay.io/podman/stable:v5.8.2   # https://quay.io/repository/podman/stable?tab=tags&tag=latest
+  stage: build
+  tags:
+    - gke
+  script:
+    - podman build . -t $IMAGE_TAG -f samples/alpine-wait/Dockerfile
+    - podman save -o image.tar $IMAGE_TAG
+  variables:
+    BUILDAH_FORMAT: docker
+    IMAGE_TAG: $IMAGE_NAME:1.0.$CI_PIPELINE_ID
+  artifacts:
+    expire_in: 1 hours
+    paths:
+      - image.tar
+
+wiz-scan:
+  stage: build
+  needs:
+    - podman-build
+  tags:
+    - gke
+  image: docker:29.7.2
+  services:
+    - name: docker:29.7.2-dind
+      alias: docker
+      command:
+        - "--tls=false"
+  script:
+    - |
+      echo "WIZ_CLIENT_ID length: ${#WIZ_CLIENT_ID}"
+      echo "WIZ_CLIENT_SECRET length: ${#WIZ_CLIENT_SECRET}"
+      docker info
+      LOAD_OUTPUT=$(docker load -i image.tar)
+      echo "$LOAD_OUTPUT"
+      LOADED_TAG=$(echo "$LOAD_OUTPUT" | awk '{print $NF}')
+      echo "Loaded as [$LOADED_TAG]"
+      IMAGE_TAG="$IMAGE_NAME:${LOADED_TAG##*:}"
+      printf '%s' "$IMAGE_TAG" | od -c | tail -5
+      docker tag "$LOADED_TAG" "$IMAGE_TAG"
+      echo "Rescanning as [$IMAGE_TAG]"
+      docker pull public-registry.wiz.io/wiz-app/wizcli:1
+      docker tag public-registry.wiz.io/wiz-app/wizcli:1 wizcli:latest
+      docker run --rm wizcli:latest version
+      docker run --rm \
+        --privileged \
+        --security-opt apparmor:unconfined \
+        --cap-add SYS_ADMIN \
+        -e WIZ_CLIENT_ID="$WIZ_CLIENT_ID" \
+        -e WIZ_CLIENT_SECRET="$WIZ_CLIENT_SECRET" \
+        -v /var/lib/docker:/var/lib/docker \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v /var/run/docker/containerd/containerd.sock:/run/containerd/containerd.sock \
+        wizcli:latest scan container-image "$IMAGE_TAG" --driver=mountWithLayers || true
+      echo "Sleeping for debug"
+      sleep 300
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
