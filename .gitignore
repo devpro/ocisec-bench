@@ -1,0 +1,7 @@
+# secret files
+id_rsa
+id_rsa.pub
+kubeconfig
+*.cer
+*.pem
+*.key
