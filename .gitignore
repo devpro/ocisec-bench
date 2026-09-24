@@ -5,3 +5,7 @@ kubeconfig
 *.cer
 *.pem
 *.key
+.env
+
+# temp files
+image.tar
